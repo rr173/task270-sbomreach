@@ -143,8 +143,12 @@ type AnalysisResult struct {
 }
 
 // Analyze 执行一次完整的可达性分析并落库路径。
-// ctx 取消时不得清空旧路径或推进发布物状态。
+// ctx 取消时不得清空旧路径或推进发布物状态：路径写入走单事务回滚，
+// 状态推进在路径落库之后、且再次检查 ctx 后才执行。
 func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*AnalysisResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	rel, err := s.releases.Get(releaseID)
 	if err != nil {
 		return nil, err
@@ -211,8 +215,15 @@ func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*Analy
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		// 客户端已取消：在动任何已落库数据之前返回，不推进状态、不删路径。
+		return nil, err
+	}
 
-	// 5. 事务内清空旧路径并写入新路径（先落库路径，再推进状态）
+	// 5. 事务内清空旧路径并写入新路径（先落库路径，再推进状态）。
+	// 用 ReplaceByRelease 而非 ClearByRelease + 单条 Insert：整个清空-写入在
+	// 同一事务内完成，ctx 取消或写入失败即回滚，避免“旧路径被删光、新路径
+	// 没写回”的半写状态。
 	result := &AnalysisResult{ReleaseID: releaseID, NewStatus: model.ReleasePendingReview}
 	allPaths := []*model.ReachPath{}
 	for _, o := range outcomes {
@@ -229,13 +240,17 @@ func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*Analy
 			}
 		}
 	}
-	_ = s.paths.ClearByRelease(releaseID)
-	for _, p := range allPaths {
-		_ = s.paths.Insert(p)
+	if err := s.paths.ReplaceByRelease(ctx, releaseID, allPaths); err != nil {
+		return nil, fmt.Errorf("落库可达路径: %w", err)
 	}
 	result.CyclesFound = len(cycles)
 
 	// 6. 推进状态到 pending_review（receiving/composing 均沿状态机推进）
+	if err := ctx.Err(); err != nil {
+		// 路径已落库，但请求在推进状态前被取消。路径是最新一次分析结果，
+		// 留在库里可复用；状态机不推进，避免在取消时改动发布物状态。
+		return nil, err
+	}
 	for rel.Status == model.ReleaseReceiving || rel.Status == model.ReleaseComposing {
 		if _, err := rel.Advance(); err != nil {
 			return nil, err

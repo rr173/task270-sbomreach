@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"net/http"
 
 	"task270-sbomreach/internal/service"
@@ -41,8 +40,15 @@ func (h *AnalysisHandler) handle(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrorBody{Error: "method not allowed", Code: "method"})
 			return
 		}
-		go func() { _, _ = h.analysis.Analyze(context.Background(), releaseID) }()
-		writeJSON(w, http.StatusOK, service.AnalysisResult{ReleaseID: releaseID})
+		// 同步执行：调用方在同一次响应里必须拿到完整的路径计数与可达数量，
+		// 才能立刻去拉路径列表做评审。请求被取消时由 Analyze 负责回滚路径写入，
+		// 不留下“删空未写回”的半写状态。
+		result, err := h.analysis.Analyze(r.Context(), releaseID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	case "paths":
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrorBody{Error: "method not allowed", Code: "method"})

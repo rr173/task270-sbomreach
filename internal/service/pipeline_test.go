@@ -94,6 +94,48 @@ func TestAnalyzePersistsThreeVerdictsAndAdvances(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCancelDoesNotWipePaths(t *testing.T) {
+	rels, a, _, _ := testServices(t)
+	id := seedAnalyzable(t, rels, a)
+
+	// 先做一次正常分析，建立基准路径。
+	first, err := a.Analyze(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PathCount == 0 {
+		t.Fatal("基准分析应产生路径")
+	}
+	before, err := a.ListPaths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != first.PathCount {
+		t.Fatalf("基准路径数不一致: ListPaths=%d result=%d", len(before), first.PathCount)
+	}
+
+	// 用已取消的 ctx 再跑一次：不得删空旧路径、不得推进状态、不得返回成功。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.Analyze(ctx, id); err == nil {
+		t.Fatal("已取消的 ctx 下 Analyze 必须返回错误，不能返回成功")
+	}
+	after, err := a.ListPaths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("取消后路径被破坏: before=%d after=%d（旧路径必须保留）", len(before), len(after))
+	}
+	rel, err := rels.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.Status != model.ReleasePendingReview {
+		t.Fatalf("取消后状态被改动: %s（必须保持 pending_review）", rel.Status)
+	}
+}
+
 func TestAdjudicateThenExceptionExemptsComponent(t *testing.T) {
 	rels, a, _, comps := testServices(t)
 	id := seedAnalyzable(t, rels, a)

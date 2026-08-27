@@ -83,9 +83,20 @@ func TestHTTPReachabilityLoop(t *testing.T) {
 	if result.Reachable < 1 || result.PathCount < 1 {
 		t.Fatalf("analyze result %+v", result)
 	}
+	// run 必须在路径落库完成之后才返回：同一响应里的计数必须与
+	// 紧随其后的 paths 查询一致，不能先返回 0 再“补”出路径。
 	rec = get("/api/analysis/" + rel.ID + "/paths")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("paths %d %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Count != result.PathCount {
+		t.Fatalf("run 返回 %d 但 paths 查询为 %d：run 在落库前就返回了", result.PathCount, list.Count)
 	}
 	rec = get("/api/health")
 	if rec.Code != http.StatusOK {
