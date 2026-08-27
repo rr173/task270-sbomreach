@@ -16,15 +16,15 @@ import (
 // AnalysisService 编排完整的漏洞可达性分析流水线：
 // 数据装载 → 调用图构建 → 构件状态标记 → 可达性分析 → 路径落库 → 状态推进。
 type AnalysisService struct {
-	releases     *store.ReleaseStore
-	components   *store.ComponentStore
-	edges        *store.CallEdgeStore
-	vulns        *store.VulnStore
-	configs      *store.ConfigStore
-	paths        *store.PathStore
-	exceptions   *store.ExceptionStore
-	sbomImports  *store.SBOMImportStore
-	snapshots    *store.SnapshotStore
+	releases    *store.ReleaseStore
+	components  *store.ComponentStore
+	edges       *store.CallEdgeStore
+	vulns       *store.VulnStore
+	configs     *store.ConfigStore
+	paths       *store.PathStore
+	exceptions  *store.ExceptionStore
+	sbomImports *store.SBOMImportStore
+	snapshots   *store.SnapshotStore
 }
 
 // NewAnalysisService 构造分析服务。
@@ -133,13 +133,13 @@ func (s *AnalysisService) SaveConfig(cfg *model.DeployConfig) error {
 
 // AnalysisResult 是一次分析运行的输出摘要。
 type AnalysisResult struct {
-	ReleaseID   string `json:"release_id"`
-	PathCount   int    `json:"path_count"`
-	Reachable   int    `json:"reachable"`
-	Blocked     int    `json:"blocked"`
-	Insufficient int   `json:"insufficient"`
-	CyclesFound int    `json:"cycles_found"`
-	NewStatus   model.ReleaseStatus `json:"new_status"`
+	ReleaseID    string              `json:"release_id"`
+	PathCount    int                 `json:"path_count"`
+	Reachable    int                 `json:"reachable"`
+	Blocked      int                 `json:"blocked"`
+	Insufficient int                 `json:"insufficient"`
+	CyclesFound  int                 `json:"cycles_found"`
+	NewStatus    model.ReleaseStatus `json:"new_status"`
 }
 
 // Analyze 执行一次完整的可达性分析并落库路径。
@@ -215,7 +215,9 @@ func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*Analy
 		return nil, err
 	}
 
-	// 5. 事务内清空旧路径并写入新路径（先落库路径，再推进状态）
+	// 5. 单事务落库：先写回全部路径，再推进发布物状态，二者同一次提交，
+	//    任一失败或 ctx 取消整体回滚——既不留“旧路径删空但新路径未写”的半成品，
+	//    也不留“状态已推进但路径为空”的半成品。DELETE 与状态推进不再各自提交。
 	result := &AnalysisResult{ReleaseID: releaseID, NewStatus: model.ReleasePendingReview}
 	allPaths := []*model.ReachPath{}
 	for _, o := range outcomes {
@@ -235,20 +237,40 @@ func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*Analy
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.paths.ReplaceByRelease(ctx, releaseID, allPaths); err != nil {
-		return nil, fmt.Errorf("落库可达路径: %w", err)
-	}
-	result.CyclesFound = len(cycles)
-
-	// 6. 推进状态到 pending_review（receiving/composing 均沿状态机推进）
+	// 推进发布物状态（receiving/composing 均沿状态机推进到 pending_review）。
+	// 这里只改内存对象；落库放在下面的事务里，与路径重写一起提交。
 	for rel.Status == model.ReleaseReceiving || rel.Status == model.ReleaseComposing {
 		if _, err := rel.Advance(); err != nil {
 			return nil, err
 		}
 	}
-	_ = s.releases.Update(rel)
+	if err := s.commitAnalyze(ctx, releaseID, allPaths, rel); err != nil {
+		return nil, fmt.Errorf("落库可达路径并推进状态: %w", err)
+	}
+	result.CyclesFound = len(cycles)
 	result.NewStatus = rel.Status
 	return result, nil
+}
+
+// commitAnalyze 把“清空旧路径 + 写入新路径 + 推进发布物状态”放进同一事务，
+// 一次性提交。任一步失败或 ctx 取消即回滚，路径与状态都不留半成品。
+func (s *AnalysisService) commitAnalyze(ctx context.Context, releaseID string,
+	paths []*model.ReachPath, rel *model.Release) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tx, err := s.releases.BeginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // 未 Commit 时回滚（Commit 后为 no-op）
+	if err := s.paths.ReplaceByReleaseTx(tx, releaseID, paths); err != nil {
+		return err
+	}
+	if err := s.releases.UpdateTx(tx, rel); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Adjudicate 裁决一条路径为 confirmed。

@@ -83,3 +83,71 @@ func TestReplaceByReleaseIsTransactional(t *testing.T) {
 		t.Fatalf("expected replaced CVE-2, got %s", list[0].CVEID)
 	}
 }
+
+// TestReplaceByReleaseWritesAllPaths 证明 ReplaceByRelease 落库全部路径，
+// 而非历史上只写第一条的缺陷。
+func TestReplaceByReleaseWritesAllPaths(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "paths.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rel := model.NewRelease("r", "1", "")
+	if err := NewReleaseStore(db).Insert(rel); err != nil {
+		t.Fatal(err)
+	}
+	ps := NewPathStore(db)
+	paths := []*model.ReachPath{
+		model.NewReachPath(rel.ID, "v1", "CVE-1", "main", "HTTPRead"),
+		model.NewReachPath(rel.ID, "v2", "CVE-2", "main", "WeakCipher"),
+		model.NewReachPath(rel.ID, "v3", "CVE-3", "main", "HiddenImport"),
+	}
+	paths[0].Status = model.PathReachable
+	paths[1].Status = model.PathBlocked
+	paths[2].Status = model.PathInsufficientEvidence
+	if err := ps.ReplaceByRelease(context.Background(), rel.ID, paths); err != nil {
+		t.Fatal(err)
+	}
+	list, err := ps.ListByRelease(rel.ID)
+	if err != nil || len(list) != 3 {
+		t.Fatalf("n=%d err=%v want 3", len(list), err)
+	}
+}
+
+// TestReplaceByReleaseRollsBackOnInsertFailure 证明：当新路径中有一条写失败时，
+// 旧路径不被清空——DELETE 与 INSERT 必须同事务回滚，不留下半成品。
+func TestReplaceByReleaseRollsBackOnInsertFailure(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "paths.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rel := model.NewRelease("r", "1", "")
+	if err := NewReleaseStore(db).Insert(rel); err != nil {
+		t.Fatal(err)
+	}
+	ps := NewPathStore(db)
+	// 先落库一条旧路径。
+	old := model.NewReachPath(rel.ID, "v1", "CVE-1", "main", "HTTPRead")
+	old.Status = model.PathReachable
+	if err := ps.ReplaceByRelease(context.Background(), rel.ID, []*model.ReachPath{old}); err != nil {
+		t.Fatal(err)
+	}
+	// 再尝试替换：第二条路径引用不存在的 release_id，触发外键约束失败。
+	bad := model.NewReachPath("missing-release", "v2", "CVE-2", "main", "WeakCipher")
+	bad.Status = model.PathBlocked
+	// 第一条合法（与旧路径同 release），第二条非法。
+	fresh := model.NewReachPath(rel.ID, "v3", "CVE-3", "main", "HiddenImport")
+	fresh.Status = model.PathInsufficientEvidence
+	if err := ps.ReplaceByRelease(context.Background(), rel.ID,
+		[]*model.ReachPath{fresh, bad}); err == nil {
+		t.Fatal("expected foreign-key failure on bad path, got nil")
+	}
+	list, err := ps.ListByRelease(rel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].CVEID != "CVE-1" {
+		t.Fatalf("old path should survive rollback, got n=%d first=%v", len(list), list)
+	}
+}

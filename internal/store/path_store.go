@@ -49,7 +49,10 @@ func insertPath(ex execer, p *model.ReachPath) error {
 }
 
 // ReplaceByRelease 在同一事务内清空并写回某发布物的全部路径。
-// ctx 取消或插入失败时回滚，避免“路径被清空但新结果未落库”的半写状态。
+// ctx 取消或任一插入失败时回滚，避免“路径被清空但新结果未落库”的半写状态。
+//
+// 注意：DELETE 与全部 INSERT 必须同属一个事务、最后才提交，否则一旦 INSERT
+// 失败，旧路径已被删光而新路径一条未进，发布物会变成“状态已推进但无路径证据”。
 func (s *PathStore) ReplaceByRelease(ctx context.Context, releaseID string, paths []*model.ReachPath) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -58,18 +61,30 @@ func (s *PathStore) ReplaceByRelease(ctx context.Context, releaseID string, path
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM reach_paths WHERE release_id = ?`, releaseID); err != nil {
-		_ = tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // 未 Commit 时回滚（Commit 后为 no-op）
+	if err := replacePathsInTx(tx, releaseID, paths); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	return tx.Commit()
+}
+
+// ReplaceByReleaseTx 在调用方提供的事务上执行同样的清空 + 写回，
+// 用于把路径重写与发布物状态推进合并成同一次提交。
+// 调用方负责 BeginTx / Commit / Rollback；本方法只在该事务上执行 SQL。
+func (s *PathStore) ReplaceByReleaseTx(tx *sql.Tx, releaseID string, paths []*model.ReachPath) error {
+	return replacePathsInTx(tx, releaseID, paths)
+}
+
+// replacePathsInTx 在给定 execer（事务或库句柄）上：先删除旧路径，再全量插入新路径。
+// DELETE 与 INSERT 共用同一事务，故任何一步失败都会连同 DELETE 一起回滚。
+func replacePathsInTx(ex execer, releaseID string, paths []*model.ReachPath) error {
+	if _, err := ex.Exec(`DELETE FROM reach_paths WHERE release_id = ?`, releaseID); err != nil {
 		return err
 	}
-	for i, p := range paths {
-		if i > 0 {
-			break
+	for _, p := range paths {
+		if err := insertPath(ex, p); err != nil {
+			return err
 		}
-		_ = insertPath(s.db, p)
 	}
 	return nil
 }

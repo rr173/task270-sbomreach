@@ -136,3 +136,43 @@ func TestAdjudicateThenExceptionExemptsComponent(t *testing.T) {
 		t.Fatal("lib-ssl missing")
 	}
 }
+
+// TestAnalyzeRerunReplacesPathsAtomically 证明重跑分析时旧路径被整体替换
+// （而非追加，也不会因只写一条而丢失），且状态推进与路径重写作为同一次提交成功。
+func TestAnalyzeRerunReplacesPathsAtomically(t *testing.T) {
+	rels, a, _, _ := testServices(t)
+	id := seedAnalyzable(t, rels, a)
+	if _, err := a.Analyze(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	before, err := a.ListPaths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 重跑：发布物已处于 pending_review，Analyze 应整体替换路径而非追加。
+	if _, err := a.Analyze(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	after, err := a.ListPaths(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 三条证据全部落库且不重复。
+	if len(after) != len(before) {
+		t.Fatalf("rerun changed path count: before=%d after=%d", len(before), len(after))
+	}
+	got := map[string]int{}
+	for _, p := range after {
+		got[string(p.Status)]++
+	}
+	if got["reachable"] != 1 || got["blocked"] != 1 || got["insufficient_evidence"] != 1 {
+		t.Fatalf("rerun verdicts=%+v want reachable/blocked/insufficient_evidence each 1", got)
+	}
+	rel, err := rels.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.Status != model.ReleasePendingReview {
+		t.Fatalf("status=%s want pending_review", rel.Status)
+	}
+}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -19,6 +20,12 @@ func NewReleaseStore(db *sql.DB) *ReleaseStore {
 	return &ReleaseStore{db: db}
 }
 
+// BeginTx 在底层库句柄上开启一个事务，供 service 层把跨表写入
+// （如路径重写 + 发布物状态推进）合并成同一次提交。
+func (s *ReleaseStore) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return s.db.BeginTx(ctx, nil)
+}
+
 // Insert 插入发布物（存在同 ID 则冲突）。
 func (s *ReleaseStore) Insert(r *model.Release) error {
 	_, err := s.db.Exec(`
@@ -35,6 +42,20 @@ func (s *ReleaseStore) Insert(r *model.Release) error {
 // Update 更新发布物元数据与状态。
 func (s *ReleaseStore) Update(r *model.Release) error {
 	res, err := s.db.Exec(`
+		UPDATE releases SET name=?, version=?, description=?, status=?, updated_at=?, sealed_at=?
+		WHERE id=?`,
+		r.Name, r.Version, r.Description, string(r.Status),
+		formatTime(r.UpdatedAt), sealedAtString(r.SealedAt), r.ID)
+	if err != nil {
+		return err
+	}
+	return requireAffected(res, "发布物 "+r.ID)
+}
+
+// UpdateTx 在调用方提供的事务上更新发布物元数据与状态。
+// 用于把状态推进与路径重写合并成同一次提交，任一失败整体回滚。
+func (s *ReleaseStore) UpdateTx(tx *sql.Tx, r *model.Release) error {
+	res, err := tx.Exec(`
 		UPDATE releases SET name=?, version=?, description=?, status=?, updated_at=?, sealed_at=?
 		WHERE id=?`,
 		r.Name, r.Version, r.Description, string(r.Status),
