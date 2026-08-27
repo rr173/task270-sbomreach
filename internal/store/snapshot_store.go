@@ -79,15 +79,16 @@ func (s *SnapshotStore) ListByRelease(releaseID string) ([]*model.ProofSnapshot,
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	out := []*model.ProofSnapshot{}
 	for rows.Next() {
 		snap, err := scanSnapshot(rows)
 		if err != nil {
-			return out, nil
+			return nil, err
 		}
 		out = append(out, snap)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // LatestVersion 返回某发布物已使用的最大快照版本号（无则 0）。

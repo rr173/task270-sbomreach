@@ -119,16 +119,16 @@ func (s *PathStore) ListByRelease(releaseID string) ([]*model.ReachPath, error) 
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	out := []*model.ReachPath{}
-	if rows.Next() {
+	for rows.Next() {
 		p, err := scanPath(rows)
 		if err != nil {
-			return out, nil
+			return nil, err
 		}
 		out = append(out, p)
-		return out, nil
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func scanPath(row rowScanner) (*model.ReachPath, error) {

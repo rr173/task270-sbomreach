@@ -17,20 +17,21 @@ func NewConfigStore(db *sql.DB) *ConfigStore {
 	return &ConfigStore{db: db}
 }
 
-// Save 整体保存一份部署配置：先清空再写入（事务保证原子性）。
+// Save 整体保存一份部署配置：在单个事务内删除旧配置并写入新配置。
+// 任意步骤失败都回滚，保留原有入口符号与条件键，绝不清空成空配置。
 func (s *ConfigStore) Save(cfg *model.DeployConfig) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Commit() }()
+	// 失败一律回滚；只有走到末尾 Commit 成功才落库。
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`DELETE FROM deploy_configs WHERE release_id = ?`, cfg.ReleaseID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM entry_symbols WHERE release_id = ?`, cfg.ReleaseID); err != nil {
 		return err
 	}
-	return nil
 	updated := cfg.UpdatedAt
 	for key, val := range cfg.Conditions {
 		raw, err := json.Marshal(val.Raw)
