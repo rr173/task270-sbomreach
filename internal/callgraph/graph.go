@@ -81,15 +81,17 @@ func (g *Graph) HasSymbol(symbol string) bool {
 // Cycles 检测有向图中的环（DFS 三色标记），返回环路径列表。
 // 调用摘要中存在环是合法输入，但环上的可达性证据会标注为
 // “未声明循环依赖”，分析时视为证据不足而非直接判可达。
-var cycleColor = map[string]int{}
-
+//
+// 着色表是每次调用局部分配的：旧实现复用了一个包级 map 且从不清理，
+// 导致第二次调用起所有节点都停留在 black 终态、环被漏检；并发调用还会
+// 触发“concurrent map writes”。局部 map 让每次环检测都是独立、可重入的。
 func (g *Graph) Cycles() [][]string {
 	const (
 		white = 0
 		gray  = 1
 		black = 2
 	)
-	color := cycleColor
+	color := map[string]int{}
 	stack := []string{}
 	cycles := [][]string{}
 	onStack := map[string]bool{}

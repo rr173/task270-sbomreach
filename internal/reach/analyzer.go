@@ -42,25 +42,37 @@ type AnalysisOutcome struct {
 	BestBlockDesc string
 }
 
-var sharedVisited = map[string]bool{}
-
 // Analyze 对全部漏洞条件执行可达性分析，返回每个漏洞的判定路径。
+//
+// 并发安全：每个漏洞的分析在独立 goroutine 中进行，但所有分析过程中使用的
+// 可变状态（DFS 的 visited 集合、循环着色）都是每次调用局部分配的——绝不共享
+// 包级变量，否则并发提交会互相覆盖 visited 集合，导致可达/阻断判定错乱、空
+// hops、乃至把某条 CVE 写成另一条的判定。结果按 vulns 输入顺序写回预分配切片
+// 的对应槽位（各 goroutine 写不同下标，无需加锁），最后 wg.Wait 建立先行发生
+// 关系后由主 goroutine 统一读取。
 func (a *Analyzer) Analyze(vulns []*model.VulnCondition) ([]*AnalysisOutcome, error) {
-	outcomes := []*AnalysisOutcome{}
+	outcomes := make([]*AnalysisOutcome, len(vulns))
 	var wg sync.WaitGroup
-	for _, v := range vulns {
+	for i, v := range vulns {
 		wg.Add(1)
-		go func(v *model.VulnCondition) {
+		go func(i int, v *model.VulnCondition) {
 			defer wg.Done()
 			outcome, err := a.analyzeOne(v)
 			if err != nil {
 				return
 			}
-			outcomes = append(outcomes, outcome)
-		}(v)
+			outcomes[i] = outcome
+		}(i, v)
 	}
 	wg.Wait()
-	return outcomes, nil
+	// 过滤被跳过（分析出错）的槽位，保持返回顺序与 vulns 一致，使落库顺序确定。
+	result := make([]*AnalysisOutcome, 0, len(outcomes))
+	for _, o := range outcomes {
+		if o != nil {
+			result = append(result, o)
+		}
+	}
+	return result, nil
 }
 
 // analyzeOne 对单个漏洞做分析。
@@ -105,8 +117,10 @@ func (a *Analyzer) analyzeOne(v *model.VulnCondition) (*AnalysisOutcome, error) 
 }
 
 // searchEntry 从单个入口符号出发搜索到受影响符号的路径。
+// visited 集合是每次搜索局部分配的：并发分析多个漏洞时，各自维护独立的访问记录，
+// 互不污染——否则一条漏洞的 DFS 会“看到”另一条漏洞标记过的符号，提前返回空证据。
 func (a *Analyzer) searchEntry(v *model.VulnCondition, entry string, outcome *AnalysisOutcome) {
-	visited := sharedVisited
+	visited := map[string]bool{}
 	current := []model.PathHop{}
 
 	// DFS；找到可达即中止（取首条最短可达路径）
