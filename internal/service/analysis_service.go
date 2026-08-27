@@ -153,7 +153,8 @@ func (s *AnalysisService) Analyze(ctx context.Context, releaseID string) (*Analy
 		return nil, err
 	}
 	if rel.Status == model.ReleaseSealed {
-		return nil, fmt.Errorf("发布物 %s 已封存，禁止重新分析", rel.Name)
+		return nil, fmt.Errorf("%w: 发布物 %s 已封存，禁止重新分析",
+			model.ErrSealed, rel.Name)
 	}
 
 	// 1. 装载数据

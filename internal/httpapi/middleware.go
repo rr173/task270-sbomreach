@@ -68,7 +68,7 @@ func subPath(r *http.Request) string {
 
 func isNotFound(err error) bool  { return errors.Is(err, model.ErrNotFound) }
 func isConflict(err error) bool  { return errors.Is(err, model.ErrConflict) }
-func isSealed(err error) bool    { return err == model.ErrSealed }
+func isSealed(err error) bool { return errors.Is(err, model.ErrSealed) }
 func isInvalid(err error) bool   { return errors.Is(err, model.ErrInvalidArgument) }
 func isCycle(err error) bool     { return errors.Is(err, model.ErrCycleNotDeclared) }
 func isContradiction(err error) bool {

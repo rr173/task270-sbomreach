@@ -35,7 +35,8 @@ func (s *SnapshotService) CreateDraft(releaseID, vulnDBVersion string) (*model.P
 		return nil, err
 	}
 	if rel.Status == model.ReleaseSealed {
-		return nil, fmt.Errorf("发布物 %s 已封存，禁止再建快照", rel.Name)
+		return nil, fmt.Errorf("%w: 发布物 %s 已封存，禁止再建快照",
+			model.ErrSealed, rel.Name)
 	}
 	if rel.Status != model.ReleasePendingReview && rel.Status != model.ReleasePublishable {
 		return nil, fmt.Errorf(
