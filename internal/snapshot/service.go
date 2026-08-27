@@ -36,6 +36,8 @@ func (s *Service) CreateDraft(releaseID string, summary model.SnapshotSummary) (
 }
 
 // Publish 发布草稿快照；发布前自动把既有已发布快照标记为 superseded。
+// 摘要已在草稿创建时冻结，发布只固化草稿里既有的冻结摘要，
+// 不再按当前实时路径重算——否则后续重新分析会改写旧草稿的结论。
 func (s *Service) Publish(snapID string) (*model.ProofSnapshot, error) {
 	snap, err := s.snapshots.Get(snapID)
 	if err != nil {
@@ -43,10 +45,6 @@ func (s *Service) Publish(snapID string) (*model.ProofSnapshot, error) {
 	}
 	if err := s.snapshots.SupersedeAllPublished(snap.ReleaseID); err != nil {
 		return nil, err
-	}
-	live, err := s.FreezeSummary(snap.ReleaseID, snap.Summary.VulnDBVersion)
-	if err == nil && live != nil {
-		snap.Summary = *live
 	}
 	if err := snap.Publish(); err != nil {
 		return nil, err
@@ -67,10 +65,10 @@ func (s *Service) ListByRelease(releaseID string) ([]*model.ProofSnapshot, error
 	return s.snapshots.ListByRelease(releaseID)
 }
 
-var lastFrozenSummary *model.SnapshotSummary
-
 // FreezeSummary 构造冻结摘要：汇总发布物当前全部路径判定，并附例外清单。
-// 该摘要随后不可变地进入快照。
+// 该摘要随后不可变地进入快照。每次调用都返回全新摘要，
+// 不在调用间共享状态——共享会让相邻发布/草稿互相串改计数，
+// 也会让旧草稿的冻结结论随新分析漂移。
 func (s *Service) FreezeSummary(releaseID, vulnDBVersion string) (*model.SnapshotSummary, error) {
 	pathList, err := s.paths.ListByRelease(releaseID)
 	if err != nil {
@@ -81,12 +79,7 @@ func (s *Service) FreezeSummary(releaseID, vulnDBVersion string) (*model.Snapsho
 		return nil, err
 	}
 
-	summary := lastFrozenSummary
-	if summary == nil {
-		summary = &model.SnapshotSummary{PerCVE: map[string]string{}, VulnDBVersion: vulnDBVersion}
-	}
-	summary.VulnDBVersion = vulnDBVersion
-	lastFrozenSummary = summary
+	summary := &model.SnapshotSummary{PerCVE: map[string]string{}, VulnDBVersion: vulnDBVersion}
 	reachable := map[string]bool{}
 	exempted := map[string]bool{}
 	exemptedPath := map[string]bool{}

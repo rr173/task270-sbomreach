@@ -57,6 +57,57 @@ func TestPublishFreezesDraftSummaryAndSupersedes(t *testing.T) {
 	}
 }
 
+// TestPublishFreezesDraftSummaryAcrossReanalysis 复现用户场景：
+// 草稿在「弱密码特性关闭」时创建（可达1、阻断1、不足1），
+// 随后打开弱密码特性并重新分析（弱密码路径变为可达），
+// 再发布那份旧草稿。发布后的证明必须冻结草稿创建时的结论，
+// 不应被重新分析后的新计数改写。
+func TestPublishFreezesDraftSummaryAcrossReanalysis(t *testing.T) {
+	rels, a, snaps, _ := testServices(t)
+	id := seedAnalyzable(t, rels, a)
+	if _, err := a.Analyze(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := snaps.CreateDraft(id, "cvefeed-2026.08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Summary.ReachableVulns != 1 || draft.Summary.BlockedVulns != 1 {
+		t.Fatalf("draft summary=%+v", draft.Summary)
+	}
+	// 打开弱密码特性并重新分析：原本被阻断的 WeakCipherInit 路径变为可达。
+	cfg, err := a.LoadConfig(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Set("feature.legacy_ciphers.enabled", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Analyze(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	// 发布那份在旧配置下创建的草稿。
+	published, err := snaps.Publish(draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 证明必须冻结草稿创建时的结论，而非重分析后的实时计数。
+	if published.Summary.ReachableVulns != 1 || published.Summary.BlockedVulns != 1 {
+		t.Fatalf("published summary drifted from draft: %+v", published.Summary)
+	}
+	// 持久化校验：从库重新读取仍应是草稿创建时的计数。
+	reloaded, err := snaps.Get(published.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Summary.ReachableVulns != 1 || reloaded.Summary.BlockedVulns != 1 {
+		t.Fatalf("reloaded summary drifted from draft: %+v", reloaded.Summary)
+	}
+}
+
 func TestSealRequiresPublishedSnapshot(t *testing.T) {
 	rels, a, snaps, _ := testServices(t)
 	id := seedAnalyzable(t, rels, a)

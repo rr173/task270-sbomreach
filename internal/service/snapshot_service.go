@@ -51,18 +51,12 @@ func (s *SnapshotService) CreateDraft(releaseID, vulnDBVersion string) (*model.P
 }
 
 // Publish 发布快照并推进发布物到 publishable。
+// 发布只固化草稿创建时已冻结的摘要，不按当前实时路径重算——
+// 否则草稿创建后若重新分析（例如打开弱密码特性），发布会把
+// 旧草稿改写成新计数，冻结证据就此丢失。
 func (s *SnapshotService) Publish(snapID string) (*model.ProofSnapshot, error) {
 	inner := snapshot.NewService(s.snapshots, s.paths, s.exceptions)
-	snap, err := inner.Get(snapID)
-	if err != nil {
-		return nil, err
-	}
-	live, ferr := inner.FreezeSummary(snap.ReleaseID, snap.Summary.VulnDBVersion)
-	if ferr == nil && live != nil {
-		snap.Summary = *live
-		_ = s.snapshots.Update(snap)
-	}
-	snap, err = inner.Publish(snapID)
+	snap, err := inner.Publish(snapID)
 	if err != nil {
 		return nil, err
 	}
